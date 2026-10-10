@@ -5,13 +5,17 @@ description: Use when asked to analyse what a Claude Code session cost, why it w
 
 # Session Cost Review
 
-Measure a session's real token cost from its transcript, explain what drove it, and save the lessons so the next session is cheaper.
+Measure a session's real token cost from its transcripts, explain what drove it, and save the lessons so the next session is cheaper.
 
 **Announce at start:** "I'm using the session-cost-review skill to measure this session."
 
-## Why a script and not eyeballing it
+## How the work is split
 
-Transcripts are large (several MB) and **reading one into context to analyse it is itself a major cost** — the thing you are trying to measure. Always run the bundled script. Never `cat` a transcript.
+This is a hybrid: a script for what must be identical every run, research for what changes.
+
+- **Script (`analyze.py`) — counting.** Deduplication, subagent discovery, per-call pricing, tool attribution. It must give the same answer for the same transcript every time, or baselines are meaningless. Never `cat` a transcript or write an ad-hoc parser instead — reading transcripts into context is itself a major cost, the very thing being measured.
+- **Research — prices and format drift.** Rates live in a dated `prices.json` refreshed from the official page, never assumed. When the transcript format changes, the script fails loudly and you fix the script, once.
+- **You — judgement.** Diagnosis, rework, lessons.
 
 ## Checklist
 
@@ -19,8 +23,8 @@ Create a todo per item and do them in order:
 
 1. **Pick the target** — decide which session to analyse, and say which
 2. **Measure** — run the script
-3. **Sanity-check** — confirm pricing was verified, not assumed
-4. **Display** — present the matrix and the drivers
+3. **Handle failures** — schema failure, stale or missing prices
+4. **Display** — present the matrices and the drivers
 5. **Compare** — against the baseline in memory, if one exists
 6. **Diagnose** — tie cost to specific episodes in the session
 7. **Save** — write lessons to memory (only with the user's go-ahead)
@@ -29,40 +33,46 @@ Create a todo per item and do them in order:
 
 Unless the user names a session, decide between two modes:
 
-- **End-of-session review** — the current session, once real work is done.
-- **Retrospective** — a prior session. Use this whenever the current session
-  is new. A fresh session has no history worth measuring; analysing it
-  reports a few hundred tokens and teaches nothing.
+- **End-of-session review** — the current session, once real work is done. The script cuts off at the latest human prompt, so the analysis does not measure itself.
+- **Retrospective** — a prior session. Use this whenever the current session is new; a fresh session has nothing worth measuring.
 
-To find a prior session, run `analyze.py --list` and pick the most recent
-substantial transcript whose path contains the current project's slug. Note
-that worktrees get their OWN project slug (the worktree name is baked into
-the directory), so the most recent transcript overall is often from a
-different checkout than the one you are sitting in.
+`analyze.py --list` shows recent sessions with total size including subagents, subagent count, and marks the current one. Worktrees get their OWN project slug, so the most recent transcript overall is often from a different checkout than the one you are in.
 
-**Always state which session you picked and why before analysing it.** If the
-choice is genuinely ambiguous — several large recent sessions — ask rather
-than guess; analysing the wrong one wastes the whole exercise.
+**Always state which session you picked and why before analysing it.** If several large recent sessions are plausible, ask rather than guess.
 
 ## 2. Measure
 
 ```bash
-python3 ~/.claude/skills/session-cost-review/analyze.py            # current/most recent session
-python3 ~/.claude/skills/session-cost-review/analyze.py <sessionId>
-python3 ~/.claude/skills/session-cost-review/analyze.py --list     # find a transcript
+python3 ~/.claude/skills/session-cost-review/analyze.py              # current session
+python3 ~/.claude/skills/session-cost-review/analyze.py <sessionId>  # prefix ok
+python3 ~/.claude/skills/session-cost-review/analyze.py --list
 ```
 
-Transcripts live at `~/.claude/projects/<project-slug>/<sessionId>.jsonl`.
+Options: `--report <path>` also writes the output as Markdown (only when the user wants a file; default to the working directory); `--cutoff <ISO>|none` overrides the self-exclusion cutoff; `--prices <file>`; `--main-only` (never quote its result as a session total).
 
-## 3. Sanity-check before quoting any number
+The script reads `<sessionId>.jsonl` plus every `<sessionId>/subagents/agent-*.jsonl`, links each subagent to the turn that spawned it, and prices every call by its own model, cache-write TTL (5m/1h), speed (fast mode), long-context tier and data-residency multiplier.
 
-Three traps the script handles — know them, because if the format shifts you must catch it:
+## 3. Handle failures — never route around them
 
-- **`cost-state` records go stale.** They are periodic checkpoints and silently stop updating. One measured session froze at $22.65 against a true $195.48. Never quote them as the total; the script prints the last one only for contrast.
-- **Multiple transcript lines share one `requestId`.** An API call is split into thinking / text / tool_use lines and *each repeats the same usage object*. Summing lines overcounts by roughly 15x. Dedupe by `requestId`.
-- **Real per-call numbers live in `message.usage.iterations[]`.** Top-level `usage` fields are often zero.
+**Exit 3 — SCHEMA CHECK FAILED.** The format changed and the numbers would be wrong, so none are printed. Do not hand-count instead. Inspect the drift with a small streaming probe that prints *aggregates only* (record types, key sets, a few field names — never transcript content), fix `analyze.py`, re-run, and tell the user what changed. The traps the script already handles, so you can recognise drift around them:
 
-If the script reports pricing could NOT be reconciled, say so explicitly and present tokens as the hard number with cost as an estimate. Do not quietly present an unverified dollar figure.
+- One API call is split over several assistant lines that each repeat the same usage. Dedupe by `requestId` or totals inflate ~15x.
+- Real per-call numbers live in `message.usage.iterations[]`; top-level fields can be zero.
+- Subagents live in separate files; a main-only count can miss most of the cost (79% in one measured session).
+- `cost-state` records are stale snapshots and are no longer emitted; they are not used.
+
+**Exit 2 — nothing to analyse** (empty session, or nothing before the cutoff). Pick another.
+
+**Warnings** print under the header. Repeat any that affect the numbers to the user — notably Agent calls without a transcript (missing subagent cost) and orphan subagents (turn attribution unknown).
+
+**Pricing is research, not memory.** Refresh `prices.json` when the header says `STALE` (older than 30 days), `no prices file`, or lists `UNPRICED` calls:
+
+1. Fetch `https://platform.claude.com/docs/en/about-claude/pricing` (`docs.claude.com` redirects there).
+2. Extract the model table, fast-mode, long-context and data-residency sections with grep on the saved page — do not read the whole page into context.
+3. Update `prices.json`: exact model IDs as they appear in transcripts (`message.model`), all five rates, `retrieved` date, `source`. Record any derived rate in `notes`.
+4. Re-run.
+
+Never guess a rate for an unpriced model, and never alias it to a similar one (the script deliberately won't). If the lookup fails, present tokens as the hard number and dollars as partial or dated — say so explicitly.
 
 ## 4. Display
 
@@ -71,37 +81,35 @@ Lead with the component matrix — it reframes the problem:
 | Component | Tokens | Cost | Share |
 |---|---:|---:|---:|
 
-In nearly every long session, **cache reads dominate and output is a rounding error** (one measured session: 62% cache read, 32% cache write, 6% output). The useful conclusion is that cost tracks *how many times context is re-read*, not how much work was produced. Say that plainly — users usually assume the opposite.
+In nearly every long session, **cache reads and writes dominate and output is small** (5–25% across measured sessions). Cost tracks *how many times context is re-read*, not how much work was produced. Say that plainly — users usually assume the opposite.
 
-Then: calls, turns, avg context/call, $/call, the batching stat, context growth, and the most expensive turns.
+Then: the thread × model × effort × speed matrix and the subagent share, cost per active skill, batching, the tool-results table, context growth, cache-write spikes with the idle gap before each, and the most expensive turns.
+
+Label the tool-results numbers correctly when you quote them: result characters are **measured**; tokens and "re-read exposure" (result size × later calls before compaction) are **estimates** at ~4 chars/token. Exact per-tool billing is not in the log — never present an estimate as a share of the bill, and never add it to the measured totals.
 
 ## 5. Compare against the baseline
 
-Raw numbers mean little alone — $40 is good or bad only relative to something.
-Before diagnosing, check the user's memory directory for a prior cost baseline
-(look for a memory about session cost analysis). If one exists, compare this
-session against it on the dimensions that matter: $/call, average context per
-call, tools per call, and the cache-read / cache-write / output split. Say
-plainly whether this session was better or worse, and on which dimension.
+Raw numbers mean little alone. Check the user's memory for a prior cost baseline (look for a memory about session cost analysis) and compare on $/call, average context per call, tools per call, subagent share, and the component split. Say plainly whether this session was better or worse, and on which dimension.
 
-If no baseline exists, say so and treat this session as the baseline — then
-make sure step 7 saves one, so the next review has something to measure
-against.
+Comparability: baselines recorded before 2026-10-10 came from the old script — main thread only unless stated, and dollars at a hardcoded table that overpriced the 5.5 models (Opus 5.5 and Sonnet 5.5 cache reads at 2.5–3x the real rate). Compare tokens per call across that boundary, not dollars, and say so.
 
-Keep the baseline in MEMORY, never hardcoded in this skill. The numbers are
-specific to one person, one project and one model; this skill is shared.
+If no baseline exists, say so, treat this session as the baseline, and make sure step 7 saves one. Keep baselines in MEMORY, never in this skill — they are specific to one person, project and model; this skill is shared.
 
 ## 6. Diagnose
 
-Numbers alone don't change behaviour. Tie each to something that actually happened. The recurring drivers, in order:
+Tie each number to something that actually happened. The recurring drivers, in order:
 
-**Serial tool calls.** Check the batching stat. An average near 1.0 tool/call means almost everything was a separate round-trip, each re-reading the whole context. This is usually the single biggest recoverable cost.
+**Serial tool calls.** An average near 1.0 tool/call means almost everything was a separate round-trip, each re-reading the whole context. Usually the single biggest recoverable cost.
 
-**Context growth.** Compare early vs late $/call. A 2–4x rise means work done late was charged several times over for the same effort. The fix is compacting at phase boundaries, not at the auto-compact limit.
+**Context growth.** Compare early vs late $/call. A 2–4x rise means late work was charged several times over. The fix is compacting at phase boundaries, not at the auto-compact limit.
 
-**Cache-write spikes.** Writes cost ~20x reads. Large spikes mean a cold cache — usually a long idle gap past the 1h TTL, forcing a full prefix re-write. Correlate spike turns with gaps in the conversation.
+**Bulky tool results.** The tool-results table shows what fills the context: whole-file reads, unfiltered grep/cat output, a skill loaded into context. A large result early in a long thread is re-read on every later call. Name the specific results and the narrower alternative (line ranges, `head`, `--files-with-matches`, a subagent that returns conclusions only).
 
-**Rework.** The script can't detect this; you must read your own history. Find episodes where work was undone — a wrong command fanned out, a file committed then removed, an approach abandoned — and sum those turns. Report it honestly even when the cause was your own mistake; that is the most actionable category and the user cannot see it otherwise.
+**Subagent fan-out.** Check the subagent share and the top subagents. Subagents are worth it when they keep bulk out of the main context or run on a cheaper model; they are waste when they re-read the same files the main thread already holds, or run serial single-tool calls themselves.
+
+**Cache-write spikes.** Writes cost 12–40x reads. A spike after a long idle gap is a cold cache (past the 1h TTL) forcing a full prefix re-write.
+
+**Rework.** The script can't detect this; read your own history. Find work that was undone — a wrong command fanned out, a file committed then removed, an approach abandoned — and sum those turns. Report it honestly even when the cause was your own mistake; that is the most actionable category and the user cannot see it otherwise.
 
 Quantify each lever in dollars and be explicit that estimates overlap rather than add up.
 
@@ -112,16 +120,13 @@ Quantify each lever in dollars and be explicit that estimates overlap rather tha
 Use the memory format the environment specifies (typically `~/.claude/projects/<project-slug>/memory/`, one fact per file with frontmatter, plus a one-line pointer in `MEMORY.md`). A good lesson has:
 
 - **The behaviour**, stated as an instruction
-- **The evidence** — the measured number and the date, so it can be re-checked and so a future reader can tell when it has gone stale
+- **The evidence** — the measured number and the date, so it can be re-checked and a future reader can tell when it has gone stale
 - **Why** it costs money
 - **How to apply** it concretely
 
 Write the specific measurement into the memory. "Batch tool calls" is advice anyone could ignore; "502 of 519 calls carried exactly one tool, costing an estimated $60–100 of a $195 session" is evidence.
 
-Also save (or update) a **baseline** memory with the headline numbers —
-total, API calls, turns, avg context/call, $/call, tools per call, and the
-component split — so the next review has something to compare against. Date
-it, so a future reader can tell when it has gone stale.
+Also save (or update) a **baseline** memory with the headline numbers — total, main vs subagent split, API calls, turns, avg context/call, $/call, tools per call, component split, and the `prices.json` retrieval date used — so the next review can compare.
 
 ## Tone
 

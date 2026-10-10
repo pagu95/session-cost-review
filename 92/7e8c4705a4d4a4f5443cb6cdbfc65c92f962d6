@@ -1,0 +1,25 @@
+README.md
+  s_fc7cce7457e73b::t_c39e3cbda63f07 18-23
+SKILL.md
+  s_fc7cce7457e73b::t_b75bcc526b5300 8,12,14-18,26-27,36-37,39,41,46-48,51-62,64,66,68,70-75,84-86,88,92,94,96,100-104,106,108,110,112,123,129
+analyze.py
+  s_fc7cce7457e73b::t_e977f018f7f3cd 2-5,8-22,24,27-54,56,60-74,78,80-87,91-125,127-130,134,137-144,147-155,157-158,160-161,163,165-167,170-171,173-335,337-338,340-416,418,420,422-487,489-491,495,499-500,503-504,506-507,515,518-585,587-658
+prices.json
+  s_fc7cce7457e73b::t_8e007cb91783b5 1-40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "927e8c4705a4d4a4f5443cb6cdbfc65c92f962d6",
+  "prompts": {},
+  "sessions": {
+    "s_fc7cce7457e73b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "996848ff-42a6-4d1e-8a17-97f968d7f624",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Christos Karytsas <christos.karytsas@instashop.ae>"
+    }
+  }
+}
